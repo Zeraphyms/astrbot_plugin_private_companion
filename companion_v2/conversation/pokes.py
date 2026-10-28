@@ -20,6 +20,13 @@ MODEL_REPLY_OWNER = "conversation.pokes"
 MODEL_REPLY_PROMPT = (
     "把这次戳一戳当作轻量互动，按角色个性与当下状态自然回应，可以俏皮、亲近、犯困或简短接住。不推断对方为什么戳、当时的情绪或你们的关系，不编造刚发生的事；保持一条适合直接发送的简短正文，不解释选择或复述规则，最终输出遵循本轮宿主提供的回复格式。"
 )
+CONTEXT_AWARE_MODEL_REPLY_PROMPT = (
+    "用户刚拍了拍你，并且拍一拍发生前后群里有最近的聊天记录（附在通知文本里）。"
+    "先结合这段记录判断用户拍一拍的意图：是在向你提问、延续刚才的话题、表达情绪，还是单纯打招呼；"
+    "针对性回应那个意图，让拍一拍像一个自然的'叫人'动作。如果记录与拍一拍无关，就按轻量互动自然回应。"
+    "按角色个性与当下状态回应，可以俏皮、亲近、犯困或简短接住；保持一条适合直接发送的简短正文，"
+    "不解释选择或复述规则，不输出抽卡建议或账号规划，最终输出遵循本轮宿主提供的回复格式。"
+)
 
 
 def poke_reply_profile(provider, *, max_output_tokens=128):
@@ -37,6 +44,7 @@ class PokePolicy:
     back_times: int = 1
     model_reply_enabled: bool = False
     model_reply_probability: float = 0.3
+    model_context_enabled: bool = False
 
     @classmethod
     def parse(cls, value):
@@ -44,12 +52,14 @@ class PokePolicy:
             value = {}
         if type(value) is not dict or set(value) - {
                 "enabled", "trigger_probability", "replies", "back_probability", "back_times",
-                "model_reply_enabled", "model_reply_probability"}:
+                "model_reply_enabled", "model_reply_probability", "model_context_enabled"}:
             raise ValueError("poke settings contain unknown fields")
         enabled = value.get("enabled", False)
         replies = value.get("replies", list(DEFAULT_REPLIES))
         model_reply_enabled = value.get("model_reply_enabled", False)
+        model_context_enabled = value.get("model_context_enabled", False)
         if (type(enabled) is not bool or type(model_reply_enabled) is not bool
+                or type(model_context_enabled) is not bool
                 or type(replies) is not list or not 1 <= len(replies) <= 20):
             raise ValueError("poke switch or replies are invalid")
         if any(type(item) is not str or not item.strip() or len(item) > 120 for item in replies):
@@ -67,7 +77,7 @@ class PokePolicy:
 
         return cls(enabled, probability("trigger_probability", 1.0), tuple(item.strip() for item in replies),
                    probability("back_probability", 0.0), back_times, model_reply_enabled,
-                   probability("model_reply_probability", 0.3))
+                   probability("model_reply_probability", 0.3), model_context_enabled)
 
     @staticmethod
     def _fraction(event_key, purpose):
@@ -92,6 +102,7 @@ class PokeReplyJob:
     context: TaskContext
     role_instruction: str
     event_key: str
+    recent_context: str = ""
 
 
 class PokeReplyModel:
@@ -124,13 +135,13 @@ class PokeReplyModel:
         require(self.tasks.check_context_access(job.context, action="conversation.reply", observed_at=at))
         return True
 
-    async def reply(self, context, role_instruction, event_key):
+    async def reply(self, context, role_instruction, event_key, recent_context: str = ""):
         if self.closed or self.runner is None:
             raise TaskError("poke_model_unavailable", "the supervised poke model is unavailable")
         if not isinstance(context, TaskContext) or not isinstance(role_instruction, str) or not role_instruction.strip():
             raise TaskError("poke_model_context_invalid", "the original role context is unavailable")
         task_id = "poke-reply-" + digest(event_key)
-        job = PokeReplyJob(context, role_instruction, event_key)
+        job = PokeReplyJob(context, role_instruction, event_key, recent_context)
         self.pending[task_id] = job
         invocation = asyncio.current_task()
         self.invocations.add(invocation)
@@ -177,9 +188,13 @@ class PokeReplyModel:
                         notice_text += "（角色当前自身状态参考：" + "，".join(parts) + "）"
             except Exception:
                 pass
+        recent_text = str(getattr(job, "recent_context", "") or "").strip()
+        if recent_text:
+            notice_text += "\n" + recent_text
         material = PromptMaterial(MODEL_REPLY_OWNER, "native_poke_notice", notice_text)
+        prompt_text = CONTEXT_AWARE_MODEL_REPLY_PROMPT if recent_text else MODEL_REPLY_PROMPT
         request = PromptRequest(trigger, job.role_instruction,
-            SealedForegroundContext((material,), (), ()), MODEL_REPLY_PROMPT, job.context.role_binding)
+            SealedForegroundContext((material,), (), ()), prompt_text, job.context.role_binding)
         completion = await self.gateway.generate(run, request)
         draft = completion.draft
         text = draft.text.strip() if draft is not None and draft.action == "text" else ""

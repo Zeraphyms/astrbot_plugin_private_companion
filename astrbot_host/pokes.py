@@ -129,7 +129,25 @@ async def receive_poke(controller, event):
             response_kind = "preset"
             if controller.poke_policy.use_model_reply(key):
                 try:
-                    generated = await controller.session.application.poke_reply_model.reply(context, instruction, key)
+                    recent_context = ""
+                    if controller.poke_policy.model_context_enabled and route.kind is ScopeKind.GROUP:
+                        participation = getattr(getattr(controller.session.application, "tools", None),
+                                                "group_participation", None)
+                        if participation is not None:
+                            items, _turns = participation.admission.native_participation_history(
+                                context, "", at=controller.now())
+                            recent_lines = []
+                            for item in items[-8:]:
+                                body = str(item.get("text", ""))[:160]
+                                if not body:
+                                    continue
+                                speaker = str(item.get("speaker_id", "")) or "群友"
+                                recent_lines.append(f"{speaker}: {body}")
+                            if recent_lines:
+                                recent_context = ("以下是拍一拍发生前后群里的最近聊天记录（按时间顺序，"
+                                                  "speaker_id 为发送者账号）：\n" + "\n".join(recent_lines))
+                    generated = await controller.session.application.poke_reply_model.reply(
+                        context, instruction, key, recent_context=recent_context)
                     if generated:
                         reply, response_kind = generated, "model"
                 except (TaskError, ValueError, TypeError, AttributeError, KeyError) as error:

@@ -719,6 +719,12 @@
         "default": 0.3,
         "minimum": 0.0,
         "maximum": 1.0
+      },
+      "model_context_enabled": {
+        "description": "启用拍一拍上下文感知",
+        "hint": "默认关闭。开启后模型回复会附带最近一段群聊记录，先判断拍一拍意图（提问/延续话题/表达情绪/打招呼）再针对性回应。",
+        "type": "bool",
+        "default": false
       }
     }
   },
